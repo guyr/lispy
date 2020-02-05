@@ -1,0 +1,218 @@
+"""useful augmentations of the core (unstable)"""
+
+(from itertools import chain repeat)
+
+#-----------------------------------------------------------------------
+# boolean operators
+
+(def is-not (a b) (not (is a b)))
+(def not-in (a b) (not (in a b)))
+#(defmacro is-not (a b) `(not (is ,a ,b)))
+#(defmacro not-in (a b) `(not (in ,a ,b)))
+
+# aliases
+
+(= is? is)         # not sure about this
+(= is-not? is-not) # not sure about this
+(= in? in)         # not sure about this
+(= not-in? not-in) # not sure about this
+(def instance? (obj types)
+    (if (isinstance types list)
+        (= types (tuple types)))
+    (isinstance obj types))
+(= subclass? issubclass)
+(= callable? callable)
+
+#-----------------------------------------------------------------------
+# conditionals
+
+# TODO?: perhaps if-not should only accept one condition?
+(defmacro if-not (&* clauses)
+    (if (% (len clauses) 2)
+        # make sure number of forms is even by inserting "else"
+        (= clauses (+ (at clauses 0 -1)
+                      `(else)
+                      (at clauses -1 None))))
+    # convert the conditions (except for "else") to their negation
+    (= clauses (mapfor [i form] in (enumerate clauses)
+                    (if (not (% i 2))
+                            (if (== (unqualify form) `else) `else
+                                else `(not ,form))
+                        else form)))
+    `(if ,@clauses))
+
+(defmacro when (cond &* exprs)
+    `(if ,cond (do ,@exprs)))
+
+(defmacro unless (cond &* exprs)
+    `(if (not ,cond) (do ,@exprs)))
+#    `(when (not ,cond) ,@exprs))
+(= when-not unless) # alias
+
+# like if, but with implicit do
+(defmacro cond (&* clauses)
+    (if (not clauses)
+        (raise SyntaxError "cond takes at least 1 clause (0 given)"))
+    `(if ,@(chain &*
+            (mapfor clause in clauses
+                (if-not (instance? clause (tuple* tuple list))
+                    (raise SyntaxError
+                           "cond clause must be a tuple or a list"))
+                (if (< (len clause) 2)
+                    (raise SyntaxError
+                           (% "cond clause must have at least 2 elements (%d given)"
+                              (len clause))))
+                [(at clause 0) `(do ,@(at clause 1 None))]))))
+
+# TODO: not accept just default clause (like if)
+# TODO: swap names with case*
+# TODO: do also ecase
+(defmacro case (expr &* forms)
+    (if (== 0 (len forms))
+        (raise SyntaxError "case takes at least 2 arguments (1 given)"))
+    (if (% (len forms) 2)
+        # make sure number of forms is even by inserting "else"
+        (= forms (+ (at forms 0 -1)
+                    `(else)
+                    (at forms -1 None))))
+    (= value (gensym))
+    `(do
+        # evaluate the expression
+        (= ,value ,expr)
+        # turn each value into a boolean equivalence check
+        (if ,@(mapfor [i form] in (enumerate forms)
+                (if-not (% i 2)
+                            (if (== (unqualify form) `else) `else
+                                else `(== ,value ,form))
+                        else form)))))
+
+# like case, but with implicit do
+(defmacro case* (expr &* clauses)
+    (if (== 0 (len clauses))
+        (raise SyntaxError "case* takes at least 1 clause (0 given)"))
+    `(case ,expr ,@(chain &*
+            (mapfor clause in clauses
+                (if-not (instance? clause (tuple* tuple list))
+                    (raise SyntaxError
+                           "case* clause must be a tuple or a list"))
+                (if (< (len clause) 2)
+                    (raise SyntaxError
+                           (% "case* clause must have at least 2 elements (%d given)"
+                              (len clause))))
+                [(at clause 0) `(do ,@(at clause 1 None))]))))
+
+# TODO: not accept just default clause (like if)
+# TODO: keyword support (can't use lambda trick)
+(defmacro match-args (args &* forms)
+    # TODO: make sure the form is correct (i.e. there are valid clauses)
+    (= keywords [])
+    (when (and (> (len forms) 0)
+               (== (at forms 0) ":keywords"))
+        (if (== (len forms) 1)
+            (raise SyntaxError "match-args argument list ended unexpectedly after :keywords"))
+        (= keywords (at forms 1))
+        (= forms (at forms 2 None)))
+    # validate keywords
+    (if-not (instance? keywords (tuple [tuple list]))
+        (raise SyntaxError "match-args keywords argument must be a tuple or list of symbols"))
+    (for sym in keywords
+        (if-not (symbol? sym)
+            (raise SyntaxError "match-args keywords must be symbols")))
+
+    (if (== 0 (len forms))
+        (raise SyntaxError "match-args takes at least 2 arguments (1 given)"))
+
+    # make sure number of forms is even by inserting "else"
+    (if (% (len forms) 2)
+        (= forms (+ (at forms 0 -1)
+                    `(else)
+                    (at forms -1 None))))
+
+    # turn each arg list into a boolean expression
+    `(if ,@(map-for [i form] in (enumerate forms)
+            (if-not (% i 2)
+                (if (== (unqualify form) `else) `else
+                    else `(try  (.update (locals)
+                                         ((lambda ,form (locals)) ,@args))
+                            (except [TypeError e] False)
+                            (else True)))
+                else form))))
+
+#-----------------------------------------------------------------------
+
+(def printf (fmt &* args)
+    (print (% fmt &* args)))
+
+(def prinlf (fmt &* args)
+    (print (% fmt &* args) :end ""))
+
+#-----------------------------------------------------------------------
+# looping/iteration
+
+#(= map* map-for)
+#(= imap* imap-for)
+
+(defmacro reduce-for (names0 names1 seq &* trans)
+    #TODO: process the :initial keyword!
+    #TODO: implement closures!
+    `(reduce (lambda (,names0 ,names1) ,@trans) ,seq)
+)
+
+# frozen
+(comment
+    (defmacro filter-for (names inkw seq &* cond)
+        `(map-for ,names ,inkw ,seq
+             (if (do ,@cond) ,names else (continue))))
+    (defmacro ifilter-for (names inkw seq &* cond)
+        `(imap-for ,names ,inkw ,seq
+             (if (do ,@cond) ,names else (continue))))
+
+    (defmacro filterfalse-for (names inkw seq &* cond)
+        `(map-for ,names ,inkw ,seq
+             (if (not (do ,@cond)) ,names else (continue))))
+    (defmacro ifilterfalse-for (names inkw seq &* cond)
+        `(imap-for ,names ,inkw ,seq
+             (if (not (do ,@cond)) ,names else (continue))))
+)
+
+# TODO: optionally support the in keyword
+(defmacro ifilter-for (names seq &* cond)
+    `(imap-for ,names in ,seq
+         (if (do ,@cond) ,names (continue))
+     )
+)
+(defmacro ifilterfalse-for (names seq &* cond)
+    `(ifilter* ,names ,seq (not ,@cond)) )
+(defmacro filter-for (names seq &* cond)
+    `(list (ifilter* ,names ,seq ,@cond)))
+(defmacro filterfalse-for (names seq &* cond)
+    `(list (ifilter* ,names ,seq (not ,@cond))))
+
+(comment
+    (import sys)
+    (print #(macroexpand
+        (filter* mod sys.modules
+             (.startswith mod "comp")
+         )
+    )#)
+)
+
+(defmacro forever (&* exprs)
+    `(for _ in (repeat None) ,@exprs))
+
+(defmacro iforever (&* exprs)
+    `(imap-for _ in (repeat None) ,@exprs))
+
+#-----------------------------------------------------------------------
+
+(= __all__ (.split (+
+    "is-not not-in "
+    "is? is-not? in? not-in? instance? subclass? callable? "
+    "if-not when unless when-not cond case case* " #match-args "
+    "printf prinlf "
+#    "map* imap* "
+#    "filter* ifilter* filterfalse* ifilterfalse* "
+    "filter-for ifilter-for filterfalse-for ifilterfalse-for "
+    "reduce-for "
+    "forever iforever "
+)))

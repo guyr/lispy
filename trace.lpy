@@ -1,0 +1,140 @@
+(from lispy.interp import tuple_startswith_sym)
+
+#-----------------------------------------------------------------------
+
+# TODO: test
+(defmacro trace-quasiquote (tracefunc level form)
+    #(print "WORKING ON:" form)
+    (if-not (instance? form tuple)
+        (return `(quote (trace ,tracefunc ,form))))
+    (= tmp-list [])
+    (for arg in form
+        (if
+            (tuple_startswith_sym arg ["unquote" "__lispy__:unquote"])
+                (.append tmp-list
+                    (if (== 0 level)
+                        `(trace ,tracefunc ,(at arg 1))
+                        `(trace-quasiquote ,tracefunc ,(- 1 level) ,(at arg 1))))
+
+            (tuple_startswith_sym arg ["unquote-splicing" "__lispy__:unquote-splicing"])
+                (.extend tmp-list
+                    (if (== 0 level)
+                        `(trace ,tracefunc ,(at arg 1))
+                        `(trace-quasiquote ,tracefunc ,(- 1 level) ,(at arg 1))))
+
+            (tuple_startswith_sym arg ["quasiquote" "__lispy__:quasiquote"])
+                (.append tmp-list
+                    `(trace-quasiquote ,tracefunc ,(+ 1 level) ,arg))
+
+            :else
+                (.append tmp-list
+                    `(trace-quasiquote ,tracefunc ,level ,arg))
+        ))
+    `(tuple* ,@tmp-list)
+)
+
+# TODO(variants): trace macros, primitives and constants! (w/more callbacks)
+# TODO(variant): change the code or return value instead of just tracing
+(defmacro trace (tracefunc &* forms)
+    #(print "trace: called with" forms)
+    (unless (symbol? tracefunc)
+        # tracefunc is not a symbol, convert it to one to prevent
+        # multiple evaluations.
+        (return `(do 
+                    (= .tracefunc-sym. ,tracefunc)
+                    (trace .tracefunc-sym. ,@forms))))
+    # TODO: "compile/macro time" optimizations (e.g. handle qualified primitives)
+    `(do ,@(map-for form in forms
+        (if 
+            # handle tuple forms
+            (and (instance? form tuple) form)
+            `(if
+                 # handle primitives (trace recursively if possible)
+                 (primitive? ,(at form 0))
+                     (if
+                         # handle do
+                         (== ,(at form 0) do)
+                             (trace ,tracefunc ,@(at form 1 None) )
+                             
+                         (== ,(at form 0) eval) 
+                             (eval (trace ,tracefunc ,(at form 1))
+                                   # TODO: trace also env params (globals/locals)
+                                   ,@(at form 2 None))
+
+                         (== ,(at form 0) quote)
+                             (quote (trace ,tracefunc ,(at form 1)))
+
+                         (== ,(at form 0) quasiquote)
+                             # trace also the unquoted parts (untested)
+                             (trace-quasiquote ,tracefunc 0 ,(at form 1))
+
+                         # TODO: handle if*, try, ...
+                        
+                         # else leave it as it is
+                         :else ,form
+                     )
+
+                 # handle macros (trace recursively)
+                 (macro? ,(at form 0))
+                    #(trace ,tracefunc (eval (macroexpand (quote ,form))))
+                    (do
+                        (= .expanded-form. (macroexpand (quote ,form)))
+                        (= .expanded-form. `(,trace ,,tracefunc ,.expanded-form.))
+                        (eval .expanded-form.))
+
+                 # handle functions (trace the args, then apply the
+                 # tracefunc directly to the form)
+                 # TODO: trace the form as well!
+                 # TODO: properly trace keyword and star args
+                 :else
+                     (,tracefunc 
+                        ,@(map-for arg in form `(trace ,tracefunc ,arg)))
+             )
+
+            # handle list forms
+            (and (instance? form list) form)
+            `[ ,@(map-for arg in form `(trace ,tracefunc ,arg)) ]
+
+            # TODO: trace dicts
+
+            # else leave it as it is
+            form
+        )
+    ))
+)
+
+#-----------------------------------------------------------------------
+
+# TODO: nested tracing!
+
+(when (== __name__ "__main__")
+    (from pprint import pprint)
+
+    (def apply-tracing (func &* args &** kargs)
+        #(print "apply-tracing:" func args kargs)
+        (try
+            (= result (func &* args &** kargs))
+            (except (Exception e)
+                #(print (globals))
+                (printf "apply-tracing:\n\tfunc=%s\n\targs=%s\n\tkwargs=%s\n\tEXCEPTION=%s"
+                        func args kargs e)
+                (raise)
+            )
+            (else
+                #(print (globals))
+                (printf "apply-tracing:\n\tfunc=%s\n\targs=%s\n\tkwargs=%s\n\tresult=%s"
+                        func args kargs result)
+                result
+            )
+        )
+    )
+
+    #(pprint (macroexpand
+    (trace apply-tracing
+        (defmacro popo () "pie!")
+        (print "pie!")
+        1
+        (eval `(print "popo"))
+    )
+    #))
+)

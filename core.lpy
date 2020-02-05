@@ -1,0 +1,771 @@
+"""emulation of python's primitive forms in lispy"""
+
+# everything is also evaluated at compile time to enable macro
+# definitions to naturally make use of any previously defined form.
+(eval-when [:compile-toplevel :run]
+
+(=* operator (__import__ "operator" {} None))
+
+#-----------------------------------------------------------------------
+# macros, functions
+
+(=* defmacro
+    (macro defmacro (name args &* body)
+        `(eval-when [:compile-toplevel :run]
+            (=* ,name (macro ,name ,args ,@body)))))
+
+(defmacro def (name args &* body)
+    `(=* ,name (func ,name ,args ,@body)))
+
+(defmacro lambda (args &* body)
+    `(func <lambda> ,args ,@body))
+
+(defmacro return (&* forms)
+    `(return*
+        ,(if* (not forms)
+              None
+              (if* (== 1 (len forms))
+                   (at forms 0)
+                   forms))))
+
+(defmacro yield (&* forms)
+    `(yield*
+        ,(if* (not forms)
+              None
+              (if* (== 1 (len forms))
+                   (at forms 0)
+                   forms))))
+
+#-----------------------------------------------------------------------
+# classes
+
+# TODO?: turn base into a keyword arg? or join with name as a seq
+(defmacro class (name base &* forms)
+    `(=* ,name (class* ,name ,base ,@forms)))
+
+#-----------------------------------------------------------------------
+# boolean operators
+
+# TODO: more than 2 args for is,==,!=,<=,<,>=,>
+(=* not operator.not_)
+(=* is operator.is_)
+(=* == operator.eq)
+(=* != operator.ne)
+(=* <= operator.le)
+(=* <  operator.lt)
+(=* >= operator.ge)
+(=* >  operator.gt)
+(def in (a b) (operator.contains b a))
+#(defmacro in (a b) `(operator:contains ,b ,a))
+
+#-----------------------------------------------------------------------
+# conditionals
+
+(defmacro and (&* forms)
+    (if* (< (len forms) 2)
+        (raise SyntaxError
+            (% "and takes at least 2 arguments (%d given)" (len forms))))
+    (if* (== (len forms) 2)
+        `(do
+            (=* .tmp. ,(operator.getitem forms 0))
+            (if* .tmp. ,(operator.getitem forms 1) .tmp.))
+        # else reduce to recursive 2-operand form
+        `(and ,(operator.getitem forms 0)
+              (and ,@(operator.getitem forms (slice 1 None))))))
+
+(defmacro or (&* forms)
+    (if* (< (len forms) 2)
+        (raise SyntaxError
+            (% "and takes at least 2 arguments (%d given)" (len forms))))
+    (if* (== (len forms) 2)
+        `(do
+            (=* .tmp. ,(operator.getitem forms 0))
+            (if* .tmp. .tmp. ,(operator.getitem forms 1)))
+        # else reduce to recursive 2-operand form
+        `(or ,(operator.getitem forms 0)
+             (or ,@(operator.getitem forms (slice 1 None))))))
+
+(defmacro if (&* forms)
+    (if* (< (len forms) 2)
+        (raise SyntaxError
+               (% "if takes at least 2 arguments (%d given)" (len forms))))
+    # reduce to if* forms
+    # case 1: without else clause
+    (if* (== 2 (len forms))
+        `(if* ,(operator.getitem forms 0)
+              ,(operator.getitem forms 1))
+
+        # case 2: with else clause
+        (if* (== 3 (len forms))
+            `(if* ,(operator.getitem forms 0)
+                  ,(operator.getitem forms 1)
+                  ,(operator.getitem forms 2))
+
+            # case 3: the else keyword
+            (if* (and (== 4 (len forms))
+                      (symbol? (operator.getitem forms 2))
+                      (== "else" (unqualify (operator.getitem forms 2))))
+                `(if* ,(operator.getitem forms 0)
+                      ,(operator.getitem forms 1)
+                      ,(operator.getitem forms 3))
+
+                # case 4: recursive for more than 3 args
+                `(if* ,(operator.getitem forms 0)
+                      ,(operator.getitem forms 1)
+                      (if ,@(operator.getitem forms (slice 2 None))))))))
+
+#-----------------------------------------------------------------------
+# "arithmetic" operators
+
+(defmacro defreduce (opname op)
+    `(def ,opname (&* args)
+        (if (< (len args) 2)
+            (raise TypeError (% ,(operator.mod "%s takes at least 2 arguments (%%d given)" opname) (len args)))
+            (reduce ,op args))))
+
+(defreduce . getattr)
+(defreduce + operator.add)
+
+(def - (&* args)
+    (if
+        (== 0 (len args))
+            (raise TypeError "- takes at least 1 argument (0 given)")
+        (== 1 (len args))
+            (operator.neg (operator.getitem args 0))
+        else
+            (reduce operator.sub args)))
+
+(defreduce * operator.mul)
+(defreduce / operator.div) # TODO?: what about truediv?
+(defreduce // operator.floordiv)
+
+(def % (&* args)
+    (if 
+        (<  (len args) 2)
+            (raise TypeError (% "%% takes at least 2 arguments (%d given)" (len args)))
+        (== (len args) 2)
+            (operator.mod (operator.getitem args 0) (operator.getitem args 1))
+        else
+            (operator.mod (operator.getitem args 0) (operator.getitem args (slice 1 None)))))
+
+(defreduce ** operator.pow)
+(defreduce & operator.and_)
+(defreduce | operator.or_)
+(defreduce ^ operator.xor)
+(=* ~ operator.invert)
+(defreduce << operator.lshift)
+(defreduce >> operator.rshift)
+
+#-----------------------------------------------------------------------
+# subscript
+
+(=* ... Ellipsis)
+
+(def at (seq start &* args):
+    (if
+        (> (len args) 2)
+            (raise TypeError (% "at takes at most 4 arguments (%d given)" (+ 2 (len args))))
+        (not args)
+            (operator.getitem seq start)
+        else
+            (do
+                (=* stop (operator.getitem args 0))
+                (=* step (if (== 2 (len args))
+                             (operator.getitem args 1)
+                             else None))
+                # strange and experimental!
+                (if (== start ...) (=* start None))
+                (if (== stop  ...) (=* stop  None))
+                (operator.getitem seq (slice start stop step)))))
+
+(def at* (seq &* args):
+    (if (not args)
+        (raise TypeError "at* takes at least 2 arguments (1 given)"))
+    (operator.getitem seq args))
+
+# testing
+(if 0 (do
+    (defmacro test-at (&* args)
+        `(at ((class* AtTester [] (def __getitem__ (self i) (print (% "test[%s]" (tuple* i)))))) ,@args))
+    (defmacro test-at* (&* args)
+        `(at* ((class* At*Tester [] (def __getitem__ (self i) (print (% "test*[%s]" (tuple* i)))))) ,@args))
+    (test-at ... ...)
+    (test-at* ... ...)
+    #(at 1 2 3 4 5)
+    #(at* 1)
+))
+
+#-----------------------------------------------------------------------
+# assignment
+
+# TODO?: support (. ...) forms?
+# TODO?: allow multiple assignments one after another (like bind)?
+#        or allow assigning a value to multiple symbols (a = b = 1)?
+(defmacro = (form value)
+    (if
+        # assignment to (at ...) form
+        (and (isinstance form tuple)
+             form
+             (symbol? (at form 0))
+             (== "at" (unqualify (at form 0))))
+            (if
+                (< (len form) 3)
+                    (raise TypeError (% "at takes at least 2 arguments (%d given)" (- (len form) 1)))
+                (> (len form) 5)
+                    (raise TypeError (% "at takes at most 4 arguments (%d given)" (- (len form) 1)))
+                (== 3 (len form))
+                    `(do
+                        (=* .tmp. ,value)
+                        (operator.setitem ,@(at form 1 ...) .tmp.)
+                        .tmp.)
+                else
+                    (do
+                        (=* start (at form 2))
+                        (=* stop (at form 3))
+                        (=* step (if (== 5 (len form))
+                                     (at form 4)
+                                     else `None))
+                        # strange and experimental!
+                        (if (and (symbol? start) (== "..." (unqualify start)))
+                            (=* start `None))
+                        (if (and (symbol? stop)  (== "..." (unqualify stop)))
+                            (=* stop  `None))
+                        `(do
+                            (=* .tmp. ,value)
+                            (operator.setitem ,(at form 1) (slice ,start ,stop ,step) .tmp.)
+                            .tmp.)))
+    
+        # assignment to (at* ...) form
+        (and (isinstance form tuple)
+             form
+             (symbol? (at form 0))
+             (== "at*" (unqualify (at form 0))))
+            (if
+                (< (len form) 3)
+                    (raise TypeError (% "at* takes at least 2 arguments (%d given)" (- (len form) 1)))
+                else
+                    `(do
+                        (=* .tmp. ,value)
+                        ( ,(at form 1) (tuple ,(at form 2 ...)) ,value)
+                        .tmp.))
+
+        # assignment to tuple/list (may be nested)
+        (isinstance form `(,tuple ,list))
+            (if form
+                    `(do
+                        (=* .iter. (iter ,value))
+                        (try-except
+                            (= ,(at form 0) (.next .iter.))
+                            [[KeyboardInterrupt ,None (raise)]
+                             [StopIteration ,None
+                                (raise ValueError "too few values to unpack")]])
+                        (= ,(list (at form 1 ...)) .iter.)
+                        ,(list form))
+                else
+                    `(try-except
+                        (.next (iter ,value))
+                        [[KeyboardInterrupt ,None (raise)]
+                         [StopIteration ,None ,form]]
+                        (raise ValueError "too many values to unpack")))
+
+        (not (symbol? form))
+            (raise SyntaxError (% "can't assign to \"%s\" form" (.__name__ (type form))))
+
+        # assignment to dotted symbol
+        (dotted? form)
+            (do
+                (=* idx (.rfind form "."))
+                `(do
+                    (=* .tmp. ,value)
+                    (setattr ,(symbol (at form 0 idx)) ,(at form (+ 1 idx) ...) .tmp.)
+                    .tmp.))
+
+        # assignment to normal symbol, same as =*
+        else
+            `(=* ,form ,value)))
+
+# testing
+(if 0 (do
+    (= a 1)
+    (print "a:" a)
+    (= [a b] [1 2])
+    (print "[a b]:" [a b])
+    (= [a [b c]] [1 [2 3]])
+    (print "[a b c]:" [a b c])
+    #(= [a b] [1 2 3])
+    (= func.pie "pie")
+    (print "func.pie:" func.pie)
+    (= [d l] [{} [1 2 3]])
+    (= (at d "popo") "pie")
+    (= (at* d "popo" "tree") "pie")
+    (= (at l ... ...) [4 5])
+    (print "d:" d)
+    (print "l:" l)
+))
+
+#-----------------------------------------------------------------------
+# deletion
+
+# TODO?: support (. ...) forms?
+(defmacro del1 (form)
+    (if
+        # delete (at ...) form
+        (and (isinstance form tuple)
+             form
+             (symbol? (at form 0))
+             (== "at" (unqualify (at form 0))))
+            (if
+                (< (len form) 3)
+                    (raise TypeError (% "at takes at least 2 arguments (%d given)" (- (len form) 1)))
+                (> (len form) 5)
+                    (raise TypeError (% "at takes at most 4 arguments (%d given)" (- (len form) 1)))
+                (== 3 (len form))
+                    `(operator.delitem ,@(at form 1 ...))
+                else
+                    (do
+                        (= start (at form 2))
+                        (= stop (at form 3))
+                        (= step (if (== 5 (len form))
+                                     (at form 4)
+                                     else `None))
+                        # strange and experimental!
+                        (if (and (symbol? start) (== "..." (unqualify start)))
+                            (= start `None))
+                        (if (and (symbol? stop)  (== "..." (unqualify stop)))
+                            (= stop  `None))
+                        `(operator.delitem ,(at form 1) (slice ,start ,stop ,step))))
+    
+        # delete (at* ...) form
+        (and (isinstance form tuple)
+             form
+             (symbol? (at form 0))
+             (== "at*" (unqualify (at form 0))))
+            (if
+                (< (len form) 3)
+                    (raise TypeError (% "at* takes at least 2 arguments (%d given)" (- (len form) 1)))
+                else
+                    `(operator.delitem ,(at form 1) (tuple ,(at form 2 ...))))
+
+        # delete tuple/list (may be nested)
+        (isinstance form `(,tuple ,list))
+            (if form `(del ,@form)
+                else None)
+
+        (not (symbol? form))
+            (raise SyntaxError (% "can't delete \"%s\" form" (.__name__ (type form))))
+
+        # delete dotted symbol
+        (dotted? form)
+            (do
+                (= idx (.rfind form "."))
+                `(delattr ,(symbol (at form 0 idx)) ,(at form (+ 1 idx) ...)))
+
+        # delete normal symbol, same as =*
+        else
+            `(del* ,form ,value)))
+
+(defmacro del (&* forms)
+    (if
+        (not forms)
+            (raise SyntaxError "del takes at least 1 argument (0 given)")
+
+        (== 1 (len forms))
+            `(del1 ,(at forms 0))
+
+        # recur for more than one form
+        else
+            `(do
+                (del1 ,(at forms 0))
+                (del ,@(at forms 1 ...)))))
+
+#-----------------------------------------------------------------------
+# augmented assignment operators
+
+(defmacro defaug (opname baseop attr)
+    `(defmacro ,opname (obj &* args)
+        (if (== 0 (len args))
+            (raise SyntaxError ,(% "%s takes at least 2 arguments (1 given)" opname)))
+        `(do
+            (= .tmp. ,obj) # XXX does python do this?
+            (if (hasattr .tmp. ,,attr)
+                ((getattr .tmp. ,,attr)
+                    ,(if (== 1 (len args))  (at args 0)  `(,(quote ,baseop) ,@args)))
+                (= ,obj (,(quote ,baseop) .tmp. ,@args))))))
+
+(defaug +=  +  "__iadd__")
+(defaug -=  -  "__isub__")
+(defaug *=  *  "__imul__")
+(defaug /=  /  "__idiv__") # TODO?: what about truediv?
+(defaug //= // "__ifloordiv__")
+(defaug %=  %  "__imod__")
+(defaug **= ** "__ipow__")
+(defaug &=  &  "__iand__")
+(defaug |=  |  "__ior__")
+(defaug ^=  ^  "__ixoe__")
+(defaug <<= << "__ilshift__")
+(defaug >>= >> "__irshift__")
+
+#-----------------------------------------------------------------------
+# looping
+
+# TODO: support else
+(defmacro while (test &* body)
+    `(while* ,test (do ,@body)))
+
+# TODO?: support multiple "in clauses" (like clojure)?
+# TODO: support else
+(defmacro for (names inkw seq &* forms)
+    (if
+        (not forms)
+            (raise SyntaxError "for takes at least 4 arguments (3 given)")
+        (or (not (symbol? inkw))
+            (!= (unqualify inkw) "in"))
+            (raise SyntaxError "for's 2nd argument must be \"in\""))
+    `(do
+        (= .iter. (iter ,seq))
+        (while True
+            (try-except
+                (= ,names (.next .iter.))
+                [[KeyboardInterrupt ,None (raise)]
+                 [StopIteration ,None (break)]])
+            ,@forms)))
+
+# equivalent to list comprehension
+# TODO: support else
+(defmacro mapfor (names inkw seq &* forms)
+    `(do
+        (= .list. [])
+        (for ,names ,inkw ,seq
+            (.append .list.
+                (do ,@forms)))
+        .list.))
+
+# equivalent to "generator expression"
+# TODO: support else
+(defmacro iterfor (names inkw seq &* forms)
+    `((func <iterfor-generator> ()
+        (for ,names ,inkw ,seq
+            (yield (do ,@forms))))))
+
+# testing
+(if 0 (do
+    (for x in (range 10) (print x :end "")) (print)
+    (print (mapfor x in (range 10) x))
+    (print (iterfor x in (range 10) x))
+    (print (list (iterfor x in (range 10) x)))
+))
+
+#-----------------------------------------------------------------------
+# exception handling
+
+(def tuple-startswith-sym (tpl sym)
+    (and (isinstance tpl tuple)
+         (>= (len tpl) 1)
+         (symbol? (at tpl 0))
+         (== (unqualify (at tpl 0)) sym)))
+
+# TODO: rewrite in the style of process_fn_*_args
+(defmacro try (expr0 &* exprs)
+    (= exprs-copy (+ `(,expr0) exprs))
+    #(print "TRY:" exprs-copy)
+    (= exprs [])
+    (= except-clauses [])
+    (= else-expr None)
+    (= final-expr None)
+    (= expect ["except" "finally"])
+    (= last "")
+    (for expr in exprs-copy
+        (if 
+            # except clause
+            (tuple-startswith-sym expr "except")
+                (do
+                    (if (not (in "except" expect))
+                            (raise SyntaxError (% "try: except after %s" last))
+                        (<= (len expr) 2)
+                            (raise TypeError (% "try: except takes at least 2 arguments (%d given)" (- (len expr) 1))))
+                    # parse the match clause
+                    (if (symbol? (at expr 1))
+                            (do (= match-type (at expr 1))
+                                (= match-var None))
+                        (isinstance (at expr 1) (tuple [tuple list]))
+                            (if (> (len (at expr 1)) 2)
+                                    (raise TypeError (% "try: except's match clause takes at most 2 arguments (%d given)" (len (at expr 1))))
+                                (== (len (at expr 1)) 2)
+                                    (do (= match-type (at (at expr 1) 0))
+                                        (= match-var  (at (at expr 1) 1)))
+                                (== (len (at expr 1)) 1)
+                                    (do (= match-type (at (at expr 1) 0))
+                                        (= match-var  None))
+                                else
+                                    (do (= match-type None)
+                                        (= match-var  None)))
+                        else
+                            (raise TypeError "try: except's match clause must be a tuple, list or symbol"))
+                    (if (and (not (is None match-var))
+                             (not (symbol? match-var)))
+                        (raise TypeError (% "try: except var name must be a symbol, not \"%s\" object" (. (type match-var) "__name__"))))
+                    (.append except-clauses
+                        [match-type 
+                         match-var
+                         (if (== (len expr) 3)  (at expr 2)
+                             else               `(do ,@(at expr 2 None)))])
+                    (= expect 
+                        (if (or (is match-type None)
+                                (and (symbol? match-type)
+                                     (== (unqualify match-type) "None")))
+                                ["else" "finally"]
+                            else
+                                ["except" "else" "finally"]))
+                    (= last "except"))
+
+            # else clause
+            (tuple-startswith-sym expr "else")
+                (do
+                    (if (not (in "else" expect))
+                            (raise SyntaxError "try: else before except")
+                        (== (len expr) 1)
+                            (raise TypeError "try: else takes at least 1 argument (0 given)"))
+                    (= else-expr
+                        (if (== (len expr) 2)  (at expr 1)
+                            else               `(do ,@(at expr 1 None))))
+                    (= expect ["finally"])
+                    (= last "else"))
+
+            # finally clause
+            (tuple-startswith-sym expr "finally")
+                (do
+                    (if (not (in "finally" expect))
+                            (raise SyntaxError (% "try: more than one finally clause"))
+                        (== (len expr) 1)
+                            (raise TypeError "try: finally takes at least 1 argument (0 given)"))
+                    (= final-expr
+                        (if (== (len expr) 2)  (at expr 1)
+                            else               `(do ,@(at expr 1 None))))
+                    (= expect [])
+                    (= last "finally"))
+
+            # normal expression (try body)
+            else
+                (do
+                    (if (!= last "")
+                        (raise SyntaxError (% "try: body expr after %s" last)))
+                    (.append exprs expr))))
+
+    (if (and (not except-clauses)
+             (is None final-expr))
+        (raise SyntaxError "try without \"except\" or \"finally\""))
+
+    (= try-expr
+        (if (== (len exprs) 1)  (at exprs 0)
+            else               `(do ,@exprs)))
+
+    (= result
+        (if (not except-clauses)
+            try-expr
+        else
+            `(try-except ,try-expr ,except-clauses ,else-expr)))
+    (= result
+        (if (not final-expr)
+            result
+        else
+            `(try-finally ,result ,final-expr)))
+    result)
+
+# testing
+(if 0 (do
+    (print (try 1 (finally 2)))
+    (print (try pie (except NameError 2)))
+))
+
+# TODO: support multiple contexts
+# TODO: change the "as" syntax: if "as" is used or multiple contexts are
+#       specified, context must be a sequence.
+(defmacro with (context &* args)
+    (if
+        (not args)
+            (raise SyntaxError "with takes at least 2 arguments (1 given)")
+        (and (symbol? (at args 0))
+             (== (unqualify (at args 0)) "as"))
+            # handle the "as" keyword
+            (if
+                (== 1 (len args))
+                    (raise SyntaxError "with: nothing after \"as\"")
+                (== 2 (len args))
+                    (raise SyntaxError "with: body required")
+                else
+                    (= [name body]
+                       [(at args 1) (at args 2 ...)]))
+        else
+            (= [name body] [None args]))
+    (= item-sym (gensym "context-item"))
+
+    `(do
+        (= .context. ,context)
+        (= .context-exit. (. .context. "__exit__"))
+        (= ,item-sym (.__enter__ .context.))
+        (try
+            ,(if (not (is None name))
+                 `(= ,name ,item-sym))
+            (= .with-result. (do ,@body))
+            (except ()
+                (if (not (.context-exit. &* (sys:exc_info)))
+                    (raise)))
+            (else
+                (.context-exit. None None None)
+                .with-result.))))
+
+#-----------------------------------------------------------------------
+# importing
+
+# TODO: support the as keyword
+# TODO: support explicit relative imports
+# TODO: handle absolute/relative imports according to future flags
+# TODO?: handle (. x y) names?
+(defmacro import (&* names)
+    (if (not names)
+        (raise SyntaxError "import takes at least 1 argument (0 given)"))
+    (= names
+        (mapfor name in names
+            (if (not (symbol? name))
+                (raise SyntaxError
+                       (% "import argument must be a symbol, not \"%s\" object" (. (type name) "__name__"))))
+            (unqualify name)))
+
+    `(eval-when [:compile-toplevel :run]
+        ,@(mapfor name in names
+            `(= ,(if (dotted? name)
+                     (symbol (at name 0 (.find name ".")))
+                     name)
+                (__import__ ,(str name) (globals))))
+        ,names))
+
+# testing
+(if 0 (do
+    (print (import sys))
+    (print (import sys os))
+    (print (import os.path))
+    #(import)
+))
+
+# TODO?: use the compile-time value of "__all__"?
+# TODO: support the as keyword
+# TODO: support explicit relative imports
+# TODO: handle absolute/relative imports according to future flags
+# TODO?: handle (. x y) names?
+(defmacro from (modname importkw &* names)
+    (if
+        (not names)
+            (raise SyntaxError "from takes at least 3 argument (2 given)")
+        (not (symbol? modname))
+            (raise SyntaxError
+                   (% "from argument must be a symbol, not \"%s\" object" (. (type modname) "__name__")))
+        (or (not (symbol? importkw))
+            (!= (unqualify importkw) "import"))
+            (raise SyntaxError "from's 2nd argument must be \"import\""))
+    (= names
+        (mapfor name in names
+            (if (not (symbol? name))
+                (raise SyntaxError
+                       (% "from name list argument must be a symbol, not \"%s\" object" (. (type name) "__name__"))))
+            (if (dotted? name)
+                (raise SyntaxError
+                       "from name list argument can't be a dotted symbol"))
+            (unqualify name)))
+    (= modname (str (unqualify modname)))
+
+    (= tmp-mod (gensym (.replace modname "." "-")))
+    `(eval-when [:compile-toplevel :run]
+        (= ,tmp-mod (__import__ ,(str modname) (globals) None ,(map str names)))
+
+        ,(if (and (== (len names) 1)
+                  (== (at names 0) "*"))
+                `(mapfor .name. in
+                    (if (hasattr ,tmp-mod "__all__")
+                            (getattr ,tmp-mod "__all__")
+                         else 
+                            (filter (lambda (n) (not (.startswith n "_")))
+                                    (.iterkeys (vars ,tmp-mod))))
+                    (= (at (locals) .name.)
+                       (. ,tmp-mod .name.)))
+             else
+                `(do
+                    (= ,names
+                        ,(mapfor name in names
+                            `(. ,tmp-mod ,(str name))))
+                    ,names))))
+
+# testing
+(if 0 (do
+    (print (from sys import _getframe))
+    (print (from sys import *))
+    (print (from os.path import *))
+    #(from nomod import)
+    #(from sys importy *)
+    #(from 1 import noname)
+    #(from nomod import 1)
+    #(from nomod import popo.pie)
+))
+
+#-----------------------------------------------------------------------
+# misc.
+
+(defmacro eval-when-compile (&* body)
+    `(eval-when [:compile-toplevel]
+        ,@body))
+
+(defmacro eval-and-compile (&* body)
+    `(eval-when [:compile-toplevel :run]
+        ,@body))
+
+# TODO?: turn into a function?
+(defmacro assert (test :arg None)
+    `(if (and __debug__ (not ,test))
+         (raise
+            ,(if (is arg None) `(AssertionError)
+                 else          `(AssertionError ,arg)))))
+
+# TODO?: move to more
+(def prinl (&* args &** kwargs)
+    (= (at kwargs "end") "")
+    (print &* args &** kwargs))
+
+# TODO?: move to more
+(defmacro comment (&* forms)
+    None)
+
+#-----------------------------------------------------------------------
+# constructors
+# TODO?: move to more (and remove compiler dependence on dict*)
+
+(def tuple* (&* args) args)
+(def list* (&* args) (list args))
+
+(def dict* (&* args)
+    (if (% (len args) 2)
+        (raise TypeError "dict* takes an even number of arguments"))
+    (dict (zip (at args 0 ... 2)
+               (at args 1 ... 2))))
+
+(def set* (&* args) (set args))
+(def frozenset* (&* args) (frozenset args))
+
+#-----------------------------------------------------------------------
+
+) # end of (eval-when [:compile-toplevel :run]
+
+(= __all__ (.split (+
+    "not is == != <= < >= > in "
+    "defmacro def lambda return yield "
+    "class "
+    "and or if "
+    ". + - * / // % ** & | ^ ~ << >> "
+    "... at at* "
+    "= del "
+    "+= -= *= /= //= %= **= &= |= ^= <<= >>= "
+    "while for mapfor iterfor "
+    "try with "
+    "import from "
+    "eval-when-compile eval-and-compile "
+    "assert prinl comment "
+    "tuple* list* dict* set* frozenset* "
+)))
